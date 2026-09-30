@@ -199,6 +199,12 @@ def read_gnis(cells):
             lat = float(p[col['prim_lat_dec']]); lon = float(p[col['prim_long_dec']])
         except ValueError:
             continue
+        # A few western Aleutian entries are recorded past -180 (e.g. -182.3). Wrap them, or they
+        # land in a square no device ever looks in (found when the T-Deck's USA list came up 2 short).
+        if lon < -180:
+            lon += 360
+        elif lon >= 180:
+            lon -= 360
         if lat == 0 and lon == 0:
             continue
         name = p[col['feature_name']].strip()
