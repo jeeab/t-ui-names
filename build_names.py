@@ -298,6 +298,13 @@ def read_geonames_zip(zname, member, cells, box=None, kinds=GN_KIND, force_kind=
     return kept
 
 
+def cells_items(index, region):
+    for k, v in index['cells'].items():
+        if v['region'] == region:
+            la, lo = k.split('/')
+            yield (int(la), int(lo)), v
+
+
 def main():
     load_local_names()
     cells = collections.defaultdict(list)
@@ -329,6 +336,12 @@ def main():
     index['cities'] = {'n': n, 'bytes': sz}
     with open(os.path.join(OUT, 'index.json'), 'w') as f:
         json.dump(index, f, separators=(',', ':'))
+    # One small list per region - "lat lon" per line - for the T-Deck's "All of the USA / Europe"
+    # download. index.json is 150KB of JSON; the device only needs to know which squares exist.
+    for r in ('us', 'eu'):
+        cells = sorted((la, lo) for (la, lo), _ in cells_items(index, r))
+        with open(os.path.join(OUT, '%s.lst' % r), 'w', newline='\n') as f:
+            f.write(''.join('%d %d\n' % c for c in cells))
     sizes.sort()
     print('cells: %d  total %.1f MB  median %d KB  largest %d KB  cities.tnm %d KB' % (
         len(sizes), sum(sizes) / 1e6, sizes[len(sizes) // 2] // 1024, sizes[-1] // 1024, sz // 1024))
