@@ -20,11 +20,13 @@ header, 32 bytes:
     uint32   recordsOffset (always 32)
     uint32   indexOffset
     int32    cellLat, cellLon   (-999 for cities.tnm)
-    uint32   reserved
+    uint32   flags         bit 0 = RANKED (cities.tnm): every record has the rank byte below, and
+                           records are stored biggest population first
 records, variable length, one per place:
     int32    lat * 1e6
     int32    lon * 1e6
     uint8    kind          (KINDS below)
+    uint8    rank          ONLY when RANKED: population on a log scale, round(25 * log10(pop))
     uint8    nameLen       display name, UTF-8, at most 63 bytes
     char     name[nameLen]
     uint8    keyLen        the search form: lowercase ASCII words joined by single spaces; for big
@@ -132,19 +134,37 @@ def utf8_trim(s, n):
     return b
 
 
-def write_tnm(path, cell_lat, cell_lon, places):
-    """places: list of (lat, lon, kind, name, key, extra_words)."""
-    places.sort(key=lambda p: (p[4], p[0], p[1]))
+def pop_rank(pop):
+    """Population on a log scale in one byte: 25 per tenfold. 15,000 -> 104, 1M -> 150, 10M -> 175."""
+    return max(0, min(255, int(round(25 * math.log10(max(pop, 1))))))
+
+
+def write_tnm(path, cell_lat, cell_lon, places, ranked=False):
+    """places: list of (lat, lon, kind, name, key, extra_words[, population]).
+
+    ranked (header flag 1, cities.tnm): each record carries a population-rank byte after its kind,
+    and records are stored BIGGEST FIRST - so the device can suggest "San Francisco, San Diego..."
+    for "san" by reading the top of the file, and within any one index word the entries also
+    come out biggest first."""
+    if ranked:
+        places.sort(key=lambda p: (-p[6], p[4]))
+    else:
+        places.sort(key=lambda p: (p[4], p[0], p[1]))
     recs = bytearray()
     offsets = []
-    for lat, lon, kind, name, key, extra in places:
+    for p in places:
+        lat, lon, kind, name, key, extra = p[:6]
         offsets.append(32 + len(recs))
         nb = utf8_trim(name, 63)
         kb = '|'.join([key] + list(extra)).encode('ascii')[:255]
-        recs += struct.pack('<iiBB', int(round(lat * 1e6)), int(round(lon * 1e6)), kind, len(nb)) + nb
+        recs += struct.pack('<iiB', int(round(lat * 1e6)), int(round(lon * 1e6)), kind)
+        if ranked:
+            recs += struct.pack('<B', pop_rank(p[6]))
+        recs += struct.pack('<B', len(nb)) + nb
         recs += struct.pack('<B', len(kb)) + kb
     idx = []
-    for (lat, lon, kind, name, key, extra), off in zip(places, offsets):
+    for p, off in zip(places, offsets):
+        lat, lon, kind, name, key, extra = p[:6]
         ws = []
         for seg in [key] + list(extra):
             for w in index_words(seg):
@@ -155,7 +175,8 @@ def write_tnm(path, cell_lat, cell_lon, places):
     idx.sort()
     index_off = 32 + len(recs)
     with open(path, 'wb') as f:
-        f.write(b'TNM1' + struct.pack('<IIIIiiI', len(places), len(idx), 32, index_off, cell_lat, cell_lon, 0))
+        f.write(b'TNM1' + struct.pack('<IIIIiiI', len(places), len(idx), 32, index_off, cell_lat, cell_lon,
+                                      1 if ranked else 0))
         f.write(recs)
         for w, off in idx:
             f.write(w + struct.pack('<I', off))
@@ -289,7 +310,7 @@ def read_geonames_zip(zname, member, cells, box=None, kinds=GN_KIND, force_kind=
                     continue
                 if len(f2) + 1 <= room:
                     extra.append(f2); room -= len(f2) + 1
-        rec = (lat, lon, K[kind], name, key, extra)
+        rec = (lat, lon, K[kind], name, key, extra, pop)
         if collect is not None:
             collect.append(rec)
         else:
@@ -332,7 +353,7 @@ def main():
         n, ni, sz = write_tnm(os.path.join(d, '%d.tnm' % lo), la, lo, places)
         index['cells']['%d/%d' % (la, lo)] = {'n': n, 'bytes': sz, 'region': 'us' if (la, lo) in us_cells else 'eu'}
         sizes.append(sz)
-    n, ni, sz = write_tnm(os.path.join(OUT, 'cities.tnm'), -999, -999, cities)
+    n, ni, sz = write_tnm(os.path.join(OUT, 'cities.tnm'), -999, -999, cities, ranked=True)
     index['cities'] = {'n': n, 'bytes': sz}
     with open(os.path.join(OUT, 'index.json'), 'w') as f:
         json.dump(index, f, separators=(',', ':'))
