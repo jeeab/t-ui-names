@@ -189,6 +189,39 @@ def read_gnis(cells):
     print('GNIS: %d read, %d kept' % (n, kept))
 
 
+LOCAL = {}  # geonameid -> the place's names in its own country's languages, best first
+
+
+def load_local_names():
+    """GeoNames files a famous place under its ENGLISH name - Vienna, Prague, Florence, Warsaw - and
+    keeps the local one ("Wien", "Praha", "Firenze", "Warszawa") only among hundreds of untagged
+    alternates. Tested 2026-09-30: standing in Vienna, "wien" found a river; "firenze" never found
+    Florence at all. The per-country alternatenames files tag each name with its language, and
+    countryInfo.txt says which languages each country speaks - so every place gets the names its
+    own people use. Preferred names first, then short ones; colloquial and historic ones are left
+    out ("Leningrad" is not where St Petersburg is now)."""
+    langs = {}
+    for line in open(os.path.join(RAW, 'countryInfo.txt'), encoding='utf-8'):
+        if line.startswith('#'):
+            continue
+        p = line.rstrip('\n').split('\t')
+        if len(p) > 15:
+            langs[p[0]] = {l.split('-')[0] for l in p[15].split(',') if l}
+    for c in EUROPE:
+        want = langs.get(c, set())
+        z = zipfile.ZipFile(os.path.join(RAW, 'alt', c + '.zip'))
+        f = io.TextIOWrapper(z.open(c + '.txt'), encoding='utf-8', errors='replace')
+        for line in f:
+            p = line.rstrip('\n').split('\t')
+            if len(p) < 8 or p[2] not in want or p[6] == '1' or p[7] == '1':
+                continue
+            LOCAL.setdefault(int(p[1]), []).append((p[4] != '1', p[5] != '1', p[3]))
+    for k, v in LOCAL.items():
+        v.sort()
+        LOCAL[k] = [n for _, _, n in v]
+    print('local-language names for %d European places' % len(LOCAL))
+
+
 def read_geonames_zip(zname, member, cells, box=None, kinds=GN_KIND, force_kind=None, extra_min_pop=None, collect=None):
     z = zipfile.ZipFile(os.path.join(RAW, zname))
     f = io.TextIOWrapper(z.open(member), encoding='utf-8', errors='replace')
@@ -209,6 +242,10 @@ def read_geonames_zip(zname, member, cells, box=None, kinds=GN_KIND, force_kind=
         if not key:
             continue
         extra = []
+        for ln in LOCAL.get(int(p[0]), ()):  # its own-language names come first, up to three
+            f2 = search_form(ln)
+            if f2 and f2 != key and f2 not in extra and len(extra) < 3 and                     len(key) + sum(len(e) + 1 for e in extra) + len(f2) + 1 <= 255:
+                extra.append(f2)
         pop = int(p[14] or 0)
         if extra_min_pop is not None and pop >= extra_min_pop:
             # Big places are searched by more than one name - and GeoNames files the big cities under
@@ -227,13 +264,29 @@ def read_geonames_zip(zname, member, cells, box=None, kinds=GN_KIND, force_kind=
                 a = alt.strip()
                 if not a or sum(1 for c in a if ord(c) < 0x250) < len(a):
                     continue  # not Latin script
+                if len(a) <= 4 and a.isupper():
+                    continue  # an airport or station code ("MUC"), not a name anyone types
                 f2 = search_form(a)
-                if f2 and f2 != key:
+                if f2 and f2 != key and f2 not in extra:
                     counts[f2] += 1
-            room = 255 - len(key)
-            for f2, _ in sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0]))):
-                if len(extra) >= 10:
+            room = 255 - len(key) - sum(len(e) + 1 for e in extra)
+            # World cities travel to every device as ONE file, so there the spellings are trimmed: at
+            # least two languages must agree on a form, and a town of 20,000 gets fewer than a
+            # capital. Took cities.tnm from 5.7MB to under half that - it downloads over the
+            # T-Deck's own wi-fi, so size is minutes.
+            # Small towns rarely have an English name of their own, so they keep only spellings two
+            # languages agree on. Big cities keep their top few whatever the count: GeoNames lists
+            # each spelling once, so "Wien", "Praha" and "Lisboa" each have a count of ONE, and a
+            # strict agreement rule threw exactly those away (tested: "wien" stopped finding Vienna).
+            cap, need = 10, 1
+            if force_kind == 'city':
+                cap, need = (8, 1) if pop >= 1000000 else (4, 1) if pop >= 100000 else (2, 2)
+            cap += len(extra)
+            for f2, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0]))):
+                if len(extra) >= cap:
                     break
+                if cnt < need:
+                    continue
                 if len(f2) + 1 <= room:
                     extra.append(f2); room -= len(f2) + 1
         rec = (lat, lon, K[kind], name, key, extra)
@@ -246,6 +299,7 @@ def read_geonames_zip(zname, member, cells, box=None, kinds=GN_KIND, force_kind=
 
 
 def main():
+    load_local_names()
     cells = collections.defaultdict(list)
     read_gnis(cells)
     us_cells = set(cells)
